@@ -1,0 +1,28 @@
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+logs/
+*.log
+
+# Temp files
+temp/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets (실제 config는 ~/.youtube-pipeline/config.yaml에 유지)
+# config.yaml은 템플릿으로 커밋됨 (토큰 제거 상태)

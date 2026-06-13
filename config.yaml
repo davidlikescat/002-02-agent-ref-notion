@@ -1,0 +1,21 @@
+discord:
+  bot_token: "YOUR_BOT_TOKEN"
+  channel_ids:
+    - "YOUR_CHANNEL_ID"
+  notification_channel_id: "YOUR_CHANNEL_ID"
+
+queue:
+  db_path: "~/.agent-ref-pipeline/queue.db"
+  max_batch_size: 5
+  max_retries: 3
+
+transcript:
+  languages: ["ko", "en"]
+  include_timestamps: false
+
+claude:
+  project_name: "agent ref"
+
+logging:
+  log_dir: "~/.agent-ref-pipeline/logs"
+  log_level: "INFO"
