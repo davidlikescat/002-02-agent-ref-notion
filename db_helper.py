@@ -51,6 +51,21 @@ def enqueue(url, video_id, message_id, user):
         conn.close()
 
 
+def reset_for_reprocess(video_id):
+    """실패/완료 항목을 재처리 대상으로 리셋 (중복 무시).
+    큐에 행이 있으면 status='pending', retry_count=0으로 되돌리고 True 반환.
+    큐에 없으면 아무것도 하지 않고 False 반환 (호출측에서 신규 enqueue)."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "UPDATE queue SET status='pending', retry_count=0, error_message=NULL, processed_at=NULL WHERE video_id=?",
+        (video_id,),
+    )
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    return updated > 0
+
+
 def is_duplicate(video_id):
     conn = _get_conn()
     row = conn.execute("SELECT 1 FROM queue WHERE video_id = ?", (video_id,)).fetchone()

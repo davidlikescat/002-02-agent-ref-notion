@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 import requests
@@ -37,6 +38,30 @@ logger.addHandler(logging.StreamHandler())
 # DB 초기화
 db_helper.init_db()
 
+def _log_stream_event(event):
+    """stream-json 이벤트를 읽기 쉬운 로그로 출력"""
+    etype = event.get("type", "")
+    if etype == "system":
+        logger.info("  [Claude] 시스템 초기화...")
+    elif etype == "assistant":
+        for block in event.get("message", {}).get("content", []):
+            if block.get("type") == "tool_use":
+                logger.info(f"  [Claude] 🔧 도구 호출: {block.get('name', 'unknown')}")
+            elif block.get("type") == "text" and block.get("text", "").strip():
+                logger.info(f"  [Claude] 💬 {block['text'][:150]}")
+    elif etype == "content_block_start":
+        cb = event.get("content_block", {})
+        if cb.get("type") == "tool_use":
+            logger.info(f"  [Claude] 🔧 도구 호출 시작: {cb.get('name', 'unknown')}")
+    elif etype == "result":
+        logger.info(
+            f"  [Claude] ✅ 완료 | "
+            f"턴: {event.get('num_turns', 0)} | "
+            f"소요: {event.get('duration_ms', 0)/1000:.0f}초 | "
+            f"비용: ${event.get('cost_usd', 0):.4f}"
+        )
+
+
 TEMP_DIR = os.path.expanduser("~/.agent-ref-pipeline/temp")
 MAX_BATCH = config["queue"]["max_batch_size"]
 MAX_RETRIES = config["queue"]["max_retries"]
@@ -49,13 +74,26 @@ CHANNEL_ID = config["discord"]["notification_channel_id"]
 DISCORD_API = "https://discord.com/api/v10"
 
 
-def discord_msg(content):
-    """디스코드 채널에 메시지 전송"""
+def discord_msg(content, reprocess_video_id=None):
+    """디스코드 채널에 메시지 전송.
+    reprocess_video_id가 주어지면 '재처리(중복 무시)' 버튼을 함께 첨부한다.
+    버튼 클릭은 discord_bot.py의 on_interaction(custom_id=reprocess:{vid})이 처리."""
+    payload = {"content": content[:2000]}
+    if reprocess_video_id:
+        payload["components"] = [{
+            "type": 1,  # action row
+            "components": [{
+                "type": 2,            # button
+                "style": 1,           # primary
+                "label": "재처리 (중복 무시)",
+                "custom_id": f"reprocess:{reprocess_video_id}",
+            }],
+        }]
     try:
         requests.post(
             f"{DISCORD_API}/channels/{CHANNEL_ID}/messages",
             headers={"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"},
-            json={"content": content[:2000]},
+            json=payload,
             timeout=10,
         )
     except Exception as e:
@@ -95,7 +133,8 @@ def process_item(item, idx, total):
         discord_msg(
             f"`[Step 1/3]` **자막 추출 실패** ({elapsed:.1f}초)\n"
             f"```\n{error[:500]}\n```\n"
-            f"retry: {item.get('retry_count', 0)+1}/{MAX_RETRIES}"
+            f"retry: {item.get('retry_count', 0)+1}/{MAX_RETRIES}",
+            reprocess_video_id=video_id,
         )
         return False
 
@@ -125,60 +164,84 @@ def process_item(item, idx, total):
     )
 
     try:
-        proc = subprocess.run(
-            ["/opt/homebrew/bin/claude", "-p", "--dangerously-skip-permissions", prompt],
-            capture_output=True,
+        proc = subprocess.Popen(
+            ["/opt/homebrew/bin/claude", "-p",
+             "--dangerously-skip-permissions", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=1200,
             cwd=PIPELINE_DIR,
         )
+
+        # 타임아웃 타이머
+        timed_out = False
+        def _kill():
+            nonlocal timed_out
+            timed_out = True
+            proc.kill()
+        timer = threading.Timer(1200, _kill)
+        timer.start()
+
+        try:
+            stdout_output, stderr_output = proc.communicate()
+        except:
+            proc.kill()
+            stdout_output, stderr_output = proc.communicate()
+        finally:
+            timer.cancel()
+
+        if timed_out:
+            raise subprocess.TimeoutExpired("claude", 1200)
+
+        stdout = stdout_output
         elapsed = time.time() - t0
 
         if proc.returncode != 0:
-            error_msg = proc.stderr or f"exit code: {proc.returncode}"
+            error_msg = stderr_output or stdout[:300] or f"exit code: {proc.returncode}"
             logger.error(f"Claude CLI failed for {video_id}: {error_msg}")
             db_helper.set_failed(item_id, error_msg, max_retries=MAX_RETRIES)
             discord_msg(
                 f"`[Step 2/3]` **Claude CLI 실패** ({elapsed:.1f}초)\n"
                 f"- exit code: {proc.returncode}\n"
-                f"```\n{error_msg[:500]}\n```"
+                f"```\n{error_msg[:500]}\n```",
+                reprocess_video_id=video_id,
             )
             return False
 
         # Notion 실패 감지 (exit code 0이지만 실제로 저장 못한 경우)
         fail_keywords = ["토큰이 설정되어 있지 않", "API 키", "접근 권한", "연결할 수 없", "토큰을 제공해"]
-        if any(kw in proc.stdout for kw in fail_keywords):
-            error_msg = f"Notion 저장 실패 감지: {proc.stdout[:300]}"
+        if any(kw in stdout for kw in fail_keywords):
+            error_msg = f"Notion 저장 실패 감지: {stdout[:300]}"
             logger.error(f"Claude CLI returned 0 but Notion failed for {video_id}: {error_msg}")
             db_helper.set_failed(item_id, error_msg, max_retries=MAX_RETRIES)
             discord_msg(
                 f"`[Step 2/3]` **Notion 저장 실패** ({elapsed:.1f}초)\n"
                 f"- Claude 응답은 성공이지만 Notion 연동 실패\n"
-                f"```\n{proc.stdout[:500]}\n```"
+                f"```\n{stdout[:500]}\n```",
+                reprocess_video_id=video_id,
             )
             return False
 
         logger.info(f"Claude CLI success for {video_id}")
-        logger.info(f"Claude CLI stdout (first 500 chars): {proc.stdout[:500]}")
-        if proc.stderr:
-            logger.warning(f"Claude CLI stderr: {proc.stderr[:300]}")
+        if stderr_output:
+            logger.warning(f"Claude CLI stderr: {stderr_output[:300]}")
 
         discord_msg(
             f"`[Step 2/3]` **Claude CLI 완료** ({elapsed:.1f}초)\n"
-            f"- 응답 길이: {len(proc.stdout):,}자"
+            f"- 응답 길이: {len(stdout):,}자"
         )
 
     except subprocess.TimeoutExpired:
         elapsed = time.time() - t0
         logger.error(f"Claude CLI timeout for {video_id}")
         db_helper.set_failed(item_id, "Claude CLI timeout (1200s)", max_retries=MAX_RETRIES)
-        discord_msg(f"`[Step 2/3]` **Claude CLI 타임아웃** ({elapsed:.1f}초)")
+        discord_msg(f"`[Step 2/3]` **Claude CLI 타임아웃** ({elapsed:.1f}초)", reprocess_video_id=video_id)
         return False
     except Exception as e:
         elapsed = time.time() - t0
         logger.error(f"Claude CLI error for {video_id}: {e}")
         db_helper.set_failed(item_id, str(e), max_retries=MAX_RETRIES)
-        discord_msg(f"`[Step 2/3]` **시스템 에러** ({elapsed:.1f}초)\n```\n{str(e)[:500]}\n```")
+        discord_msg(f"`[Step 2/3]` **시스템 에러** ({elapsed:.1f}초)\n```\n{str(e)[:500]}\n```", reprocess_video_id=video_id)
         return False
 
     # Step 3: 완료 처리
@@ -186,8 +249,8 @@ def process_item(item, idx, total):
 
     # Claude CLI 출력에서 노션 URL 추출
     notion_url = ""
-    if proc.stdout:
-        match = re.search(r'https://www\.notion\.so/[^\s\)]+', proc.stdout)
+    if stdout:
+        match = re.search(r'https://www\.notion\.so/[^\s\)]+', stdout)
         if match:
             notion_url = match.group(0)
 
