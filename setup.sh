@@ -104,7 +104,7 @@ cat > "$LAUNCH_AGENTS/com.agent-ref-pipeline.processor.plist" << PLIST
     <key>WorkingDirectory</key>
     <string>${PIPELINE_DIR}</string>
     <key>StartInterval</key>
-    <integer>1800</integer>
+    <integer>60</integer>
     <key>StandardOutPath</key>
     <string>${PIPELINE_DIR}/logs/processor.log</string>
     <key>StandardErrorPath</key>

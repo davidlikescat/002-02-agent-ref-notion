@@ -73,3 +73,34 @@
 - 콘텐츠가 길면 섹션별 분할 업로드, 전체 재작업 금지
 - 긴 콘텐츠를 한 번에 전송 시도 금지
 - 승인 여부 물어보기 금지
+
+---
+
+# 공통 운영 규칙 — 맥미니 무인 서버 (002 공통)
+
+> 이 프로젝트의 데몬/봇/스케줄 작업은 **맥미니에서 상시 운영**하는 것을 전제로 한다 (MacBook Pro에서는 중지). 유지보수 없이 돌릴 때의 공통 규칙.
+
+## launchd 상시 실행
+- 데몬/봇은 launchd LaunchAgent로 등록: `RunAtLoad=true`(로그인 시 시작) + `KeepAlive=true`(크래시 자동 복구). 주기 작업은 `StartInterval`(초).
+- plist 위치: `~/Library/LaunchAgents/com.<project>.<role>.plist`. 상태 확인: `launchctl list | grep <project>`.
+
+## macOS TCC 주의 (중요 — 안 지키면 launchd가 파일 못 읽음)
+- launchd로 실행된 프로세스는 `~/Documents`·Desktop·Downloads 안의 파일에 접근 불가(Operation not permitted).
+- git 레포는 `~/Documents/Agentic AI/...`에 있으므로, **코드를 거기서 직접 실행하거나 그쪽으로 심링크하면 실패**한다.
+- 해결: **런타임 디렉토리를 홈 루트(`~/.<project>/`)에 두고 코드를 복사**해 실행. `git pull` 후에는 복사본을 재동기화(sync 스크립트 권장).
+- 비밀값(config.yaml/.env/토큰)은 런타임 디렉토리에 두고 git 밖으로 유지.
+
+## 무인 운영 필수 조건 (관리자 권한 필요 — 미설정 시 서버 멈춤)
+- **절전 금지**: 기본 sleep이 짧으면 유휴 시 맥이 잠들어 봇이 멈춤. `sudo pmset -c sleep 0 disablesleep 1 autorestart 1`
+- **자동 로그인**: LaunchAgent는 GUI 세션에서만 뜬다. 재부팅/정전 복구 후 자동 시작하려면 자동 로그인 ON (시스템 설정 → 사용자 및 그룹).
+
+## Claude CLI 사용 시
+- `~/.local/bin/claude` 로그인 유지 + 필요한 MCP(예: Notion) 연결 유지. `claude mcp list`로 `✔ Connected` 확인.
+- 비대화 실행: `claude -p --dangerously-skip-permissions "<프롬프트>"` (cwd의 CLAUDE.md + 글로벌 CLAUDE.md 로드됨).
+
+## 관리 명령 (공통 패턴)
+```bash
+launchctl list | grep <project>                                # 상태
+launchctl kickstart -k gui/$(id -u)/com.<project>.<role>        # 재시작
+tail -f ~/.<project>/logs/*.log                                 # 로그
+```

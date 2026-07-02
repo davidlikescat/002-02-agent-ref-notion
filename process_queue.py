@@ -165,7 +165,7 @@ def process_item(item, idx, total):
 
     try:
         proc = subprocess.Popen(
-            ["/opt/homebrew/bin/claude", "-p",
+            [os.path.expanduser("~/.local/bin/claude"), "-p",
              "--dangerously-skip-permissions", prompt],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
